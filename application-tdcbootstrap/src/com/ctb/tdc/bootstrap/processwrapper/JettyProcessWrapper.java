@@ -2,12 +2,11 @@ package com.ctb.tdc.bootstrap.processwrapper;
 
 import java.io.BufferedReader;
 import java.io.File;
-import java.io.FileNotFoundException;
-import java.io.FileReader;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
+import java.net.ServerSocket;
 import java.net.URL;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -17,7 +16,8 @@ import com.ctb.tdc.bootstrap.processwrapper.monitor.ProcessStdErrMonitor;
 import com.ctb.tdc.bootstrap.processwrapper.monitor.ProcessStdOutMonitor;
 import com.ctb.tdc.bootstrap.util.ConsoleUtils;
 import com.ctb.tdc.bootstrap.util.ResourceBundleUtils;
-import com.ctb.tdc.bootstrap.util.ServerSocketUtils;
+import com.ctb.tdc.web.dto.ServletSettings;
+import com.ctb.tdc.web.utils.MemoryCache;
   
 
 /**
@@ -32,11 +32,16 @@ import com.ctb.tdc.bootstrap.util.ServerSocketUtils;
  */
 public class JettyProcessWrapper extends Thread {
 
-	private String tdcHome;
+	private static String tdcHome;
+	private static String javaHome;
+	private static String proxy;
 	private String jettyHome;
 	private String jettyConfig;
 	private int jettyPort;
 	private String jettyUrl = null;
+	
+	private ServerSocket startsocket;
+	private ServerSocket stopsocket;
 	
 	private String[] startCmd;
 	private String[] stopCmd;
@@ -44,59 +49,100 @@ public class JettyProcessWrapper extends Thread {
 	private int exitCode = 0;
 	private String exitMessage = "";
 	
-	private int retryAttempts = 3;
+	private int retryAttempts = 5;
 	private int retryDelay = 5;
 
     private boolean macOS = false;    
 	
-	
+    {
+    	javaHome = System.getProperty("java.home");
+		if(javaHome != null) javaHome = javaHome + "/bin/"; else javaHome = "";
+    }
 	
 	/**
 	 * Creates a new Jetty process wrapper with the given tdcHome value.
 	 * @param tdcHome  The location of the Test Delivery Client's home folder containing the home folder of Jetty as well as configuration files and additional java libraries. 
 	 * @throws ProcessWrapperException If problems within initialization such as determing the default URL or if the port is already in use.
 	 */
-	public JettyProcessWrapper(String tdcHome, boolean macOS) throws ProcessWrapperException {
+	public JettyProcessWrapper(String newTdcHome, boolean macOS, int startPort, int stopPort, ServerSocket startsocket, ServerSocket stopsocket, String baseurl) throws ProcessWrapperException {
 		super();
-
+		
         this.macOS = macOS;
         
-		this.tdcHome     = tdcHome;
-		this.jettyHome   = this.tdcHome + "/servletcontainer/jetty-5.1.11RC0";
-		this.jettyConfig = this.tdcHome + "/servletcontainer/tdc.xml";
+		tdcHome     = newTdcHome;
+		this.jettyHome   = tdcHome + "/servletcontainer/jetty-5.1.11RC0";
+		
+		this.jettyConfig = tdcHome + "/servletcontainer/tdc.xml";
+		
+		this.jettyPort = startPort;
+		
+		this.startsocket = startsocket;
+		this.stopsocket = stopsocket;
 	
-		this.startCmd = new String[10];
-		this.startCmd[0] = "java";
-		this.startCmd[1] = "-Dtdc.home=" + this.tdcHome;
-		this.startCmd[2] = "-Djetty.home=" + jettyHome;
-		this.startCmd[3] = "-Dorg.mortbay.log.LogFactory.noDiscovery=false";
-		this.startCmd[4] = "-Djetty.class.path=" + jettyHome + "/etc";
-		this.startCmd[5] = "-cp";
-		this.startCmd[6] = jettyHome + "/lib/org.mortbay.jetty.jar";
-		this.startCmd[7] = "-jar";
-		this.startCmd[8] = jettyHome + "/start.jar";
-		this.startCmd[9] = jettyConfig;
+		//String proxy = System.getProperty("tdc.proxy");
+		ServletSettings settings = MemoryCache.getInstance().getSrvSettings();
+		proxy = settings.getProxyDomain() + "\\" 
+					 + settings.getProxyUserName() + ":" 
+					 + settings.getProxyPassword() + "@"
+					 + settings.getProxyHost() + ":"
+					 + settings.getProxyPort();
+		ConsoleUtils.messageOut("Bootstrap passing proxy info: " + proxy);
+		
+		this.startCmd = new String[17];
+		this.startCmd[0] = javaHome + "java";
+		this.startCmd[1] = "-Dtdc.proxy=" + proxy;
+		this.startCmd[2] = "-Dtdc.home=" + tdcHome;
+		this.startCmd[3] = "-Xms128m";
+		this.startCmd[4] = "-Xmx256m";
+		if(baseurl == null) baseurl = "";
+		this.startCmd[5] = "-Dtdc.baseurl=" + baseurl;
+		this.startCmd[6] = "-Dtdc.productType=" + System.getProperty("product.type");
+		this.startCmd[7] = "-Djetty.port=" + startPort;
+		this.startCmd[8] = "-DSTOP.PORT=" + stopPort;
+		this.startCmd[9] = "-Djetty.home=" + jettyHome;
+		this.startCmd[10] = "-Dorg.mortbay.log.LogFactory.noDiscovery=false";
+		this.startCmd[11] = "-Djetty.class.path=" + jettyHome + "/etc";
+		this.startCmd[12] = "-cp";
+		this.startCmd[13] = jettyHome + "/lib/org.mortbay.jetty.jar";
+		this.startCmd[14] = "-jar";
+		this.startCmd[15] = jettyHome + "/start.jar";
+		this.startCmd[16] = jettyConfig;
 	
-		this.stopCmd = new String[10];
+	
+		this.stopCmd = new String[11];
+		this.stopCmd[0] = "java";
+		this.stopCmd[1] = "-Dtdc.home=" + tdcHome;
+		this.stopCmd[2] = "-DSTOP.PORT=" + stopPort;
+		this.stopCmd[3] = "-Djetty.home=" + jettyHome;
+		this.stopCmd[4] = "-Dorg.mortbay.log.LogFactory.noDiscovery=false";
+		this.stopCmd[5] = "-Djetty.class.path=" + jettyHome + "/etc";
+		this.stopCmd[6] = "-cp";
+		this.stopCmd[7] = jettyHome + "/lib/org.mortbay.jetty.jar";
+		this.stopCmd[8] = "-jar";
+		this.stopCmd[9] = jettyHome + "/stop.jar";
+		this.stopCmd[10] = jettyConfig;
+	
+		/*this.stopCmd = new String[10];
 		this.stopCmd[0] = "java";
 		this.stopCmd[1] = "-Dtdc.home=" + this.tdcHome;
-		this.stopCmd[2] = "-Djetty.home=" + jettyHome;
-		this.stopCmd[3] = "-Dorg.mortbay.log.LogFactory.noDiscovery=false";
-		this.stopCmd[4] = "-Djetty.class.path=" + jettyHome + "/etc";
-		this.stopCmd[5] = "-cp";
-		this.stopCmd[6] = jettyHome + "/lib/org.mortbay.jetty.jar";
-		this.stopCmd[7] = "-jar";
-		this.stopCmd[8] = jettyHome + "/stop.jar";
-		this.stopCmd[9] = jettyConfig;
+		this.stopCmd[2] = "-DSTOP.PORT=" + stopPort;
+		this.stopCmd[3] = "-Djetty.home=" + jettyHome;
+		this.stopCmd[4] = "-Dorg.mortbay.log.LogFactory.noDiscovery=false";
+		this.stopCmd[5] = "-Djetty.class.path=" + jettyHome + "/etc";
+		this.stopCmd[6] = "-cp";
+		this.stopCmd[7] = jettyHome + "/lib/org.mortbay.jetty.jar";
+		this.stopCmd[8] = "-jar";
+		this.stopCmd[9] = jettyHome + "/stop.jar";
+		this.stopCmd[10] = jettyConfig; */
 		
 		// Parse the jetty configuration for port and url.  this.jettyPort and this.jettyUrl
 		// get set in that method.
 		parseJettyConfig();
 		
 		// Check if the port is in use.
-		if( ServerSocketUtils.isPortInUse(this.jettyPort) ) {
-			throw new ProcessWrapperException( ResourceBundleUtils.getString("bootstrap.jetty.error.portInUse") );
-		}
+		//if( ServerSocketUtils.isPortInUse(this.jettyPort) ) {
+		//	throw new ProcessWrapperException( ResourceBundleUtils.getString("bootstrap.jetty.error.portInUse") );
+		//}
 		
 	}
 
@@ -107,36 +153,7 @@ public class JettyProcessWrapper extends Thread {
 	 */
 	private void parseJettyConfig() throws ProcessWrapperException {
 		
-		try {
-			BufferedReader in = new BufferedReader(new FileReader(this.jettyConfig));
-			String line;
-			
-			Pattern p = Pattern.compile(".*SystemProperty\\s+name=\"jetty.port\"\\s+default=\"(\\d+)\".*");
-			Matcher m;
-			boolean found = false;
-			while( (line = in.readLine()) != null && !found ) {
-				m = p.matcher(line);
-				if( m.matches() ) {
-					this.jettyPort = Integer.valueOf( m.group(1) ).intValue();
-					this.jettyUrl = "http://127.0.0.1:" + this.jettyPort + "/servlet/PersistenceServlet.do?method=verifySettings";
-					found = true;
-				}
-			}
-			in.close();
-			 
-			if( this.jettyUrl == null ) {
-				throw new ProcessWrapperException( ResourceBundleUtils.getString("bootstrap.jetty.error.configFileParseFailure") );
-			} 
-
-		} catch(FileNotFoundException fnfe) {
-			String message = ResourceBundleUtils.getString("bootstrap.jetty.error.configFileNotFound");
-			ConsoleUtils.messageErr(message, fnfe);
-			throw new ProcessWrapperException(message, fnfe);
-		} catch(IOException ioe) {
-			String message = ResourceBundleUtils.getString("bootstrap.jetty.error.configFileIOError");
-			ConsoleUtils.messageErr(message, ioe);
-			throw new ProcessWrapperException(message, ioe);
-		}
+		this.jettyUrl = "http://127.0.0.1:" + this.jettyPort + "/servlet/PersistenceServlet.do?method=verifySettings";
 		
 	}
 
@@ -211,15 +228,30 @@ public class JettyProcessWrapper extends Thread {
 		try {
 			// Start Jetty...
             if ( this.macOS ) {
-                this.startCmd[1] = this.startCmd[1].replaceAll(" ", "\\ ");
-                this.startCmd[2] = this.startCmd[2].replaceAll(" ", "\\ ");
-                this.startCmd[4] = this.startCmd[4].replaceAll(" ", "\\ ");
+                String productType = System.getProperty("product.type");
+                if("OKLAHOMA".equals(productType)) {
+                	this.startCmd[0] = javaHome + "java";
+                	this.startCmd[1] = "-d32";
+            		this.startCmd[2] = "-Dtdc.proxy=" + proxy;
+            		this.startCmd[3] = "-Dtdc.home=" + tdcHome;
+            		System.out.println(this.startCmd[3]);
+            		this.startCmd[4] = "-Xmx256m";
+            		this.startCmd[2] = this.startCmd[2].replaceAll(" ", "\\ ");
+                    this.startCmd[3] = this.startCmd[3].replaceAll(" ", "\\ ");
+                } else {
+                	this.startCmd[1] = this.startCmd[1].replaceAll(" ", "\\ ");
+                    this.startCmd[2] = this.startCmd[2].replaceAll(" ", "\\ ");
+                }
+                this.startCmd[5] = this.startCmd[5].replaceAll(" ", "\\ ");
                 this.startCmd[6] = this.startCmd[6].replaceAll(" ", "\\ ");
                 this.startCmd[8] = this.startCmd[8].replaceAll(" ", "\\ ");
                 this.startCmd[9] = this.startCmd[9].replaceAll(" ", "\\ ");
             }
         
             ConsoleUtils.messageOut("jettyHome: " + this.jettyHome);
+            // close the reserved sockets right before starting jetty
+            this.startsocket.close();
+            this.stopsocket.close();
 			Process jetty = Runtime.getRuntime().exec(this.startCmd, null, new File(this.jettyHome) );
 			
 			// Start process monitoring threads
@@ -270,6 +302,7 @@ public class JettyProcessWrapper extends Thread {
 				shutdown();
 				
 			} else {
+				Thread.sleep(500);
 				this.isAvailable = true;
 				
 				// Jetty is up, wait for the process.
@@ -307,10 +340,37 @@ public class JettyProcessWrapper extends Thread {
                 this.stopCmd[8] = this.stopCmd[8].replaceAll(" ", "\\ ");
                 this.stopCmd[9] = this.stopCmd[9].replaceAll(" ", "\\ ");
             }            
-			Runtime.getRuntime().exec(this.stopCmd, null, new File(this.tdcHome) );
+			Runtime.getRuntime().exec(this.stopCmd, null, new File(tdcHome) );
+			String teItemsPath = this.tdcHome + File.separator + "webapp" + File.separator + "items";
+			String imagePath = this.tdcHome + File.separator + "webapp" + File.separator + "cache";
+			File checkExistance = new File(teItemsPath);
+			if(checkExistance.exists()) {
+				deleteFiles(teItemsPath);
+			}
+			File checkExistanceOfImage = new File(imagePath);
+			if(checkExistanceOfImage.exists()) {
+				deleteFiles(imagePath);
+			}
+			
 		} catch( IOException e ) {
 			ConsoleUtils.messageErr("An error has occured within " + this.getClass().getName(), e);
 		}
 	}
+	/**
+	 * Delete TE items from webapp/items folder
+	 * after the test is over
+	 * Delete Magnifier images from webapp/cache folder
+	 * after the test is over
+	 */
+	public void deleteFiles(String path) {
+		File files[] = new File(path).listFiles();
+		for (File file : files) {
+			if(file.isDirectory()) {
+				deleteFiles(file.getAbsolutePath());
+				file.delete();
+			} else if(file.isFile() && file.getName().indexOf("txt") == -1) {
+				file.delete();
+			}
+		}
+	}
 }
-

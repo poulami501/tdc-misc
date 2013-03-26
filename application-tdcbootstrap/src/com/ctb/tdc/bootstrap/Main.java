@@ -1,22 +1,17 @@
 package com.ctb.tdc.bootstrap;
 
+import java.io.BufferedReader;
 import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
-import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.net.ServerSocket;
+import java.util.Enumeration;
 import java.util.zip.ZipEntry;
+import java.util.zip.ZipException;
 import java.util.zip.ZipInputStream;
-
-import org.apache.commons.httpclient.HttpClient;
-import org.apache.commons.httpclient.HttpStatus;
-import org.apache.commons.httpclient.ProxyHost;
-import org.apache.commons.httpclient.UsernamePasswordCredentials;
-import org.apache.commons.httpclient.auth.AuthScope;
-import org.apache.commons.httpclient.methods.GetMethod;
-import org.apache.commons.httpclient.protocol.Protocol;
 
 import com.ctb.tdc.bootstrap.disablers.MacScreenSaverDisabler;
 import com.ctb.tdc.bootstrap.exception.BootstrapException;
@@ -27,6 +22,7 @@ import com.ctb.tdc.bootstrap.ui.SimpleMessageDialog;
 import com.ctb.tdc.bootstrap.ui.SplashWindow;
 import com.ctb.tdc.bootstrap.util.ConsoleUtils;
 import com.ctb.tdc.bootstrap.util.ResourceBundleUtils;
+import com.ctb.tdc.web.utils.ServletUtils;
 import com.ctb.tdc.bootstrap.util.SwfFilenameFilter;
 import com.ctb.tdc.bootstrap.util.TdcConfigEncryption;
 
@@ -34,20 +30,23 @@ import com.ctb.tdc.bootstrap.util.TdcConfigEncryption;
  * The class containing the main method used in launching, or bootstrapping, 
  * the necessary components utilized in the Test Delivery Client.
  * 
- * @author Giuseppe_Gennaro
+ * @author Giuseppe_Gennaro, Nate_Cohen
  *
  */
 public class Main {
 	
+	public static String baseurl = System.getProperty("tdc.baseurl");
+	
 	/**
 	 * Sleep interval for the polling while loop within the main method.
 	 */
-	public static final int SLEEP_INTERVAL = 3;
+	public static final int SLEEP_INTERVAL = 2;
 	/**
 	 * Port number used to guarantee only one instance of the bootstrap
 	 * can be running on the workstation.
 	 */
-	public static final int SOCKET_FOR_SINGLE_INSTANCE = 12344;
+	public static int jettyPort = 0;
+	public static int stopPort = 0;
 	
 	public static final String TDC_CONFIG_FILENAME = "tdcConfig.enc";
 	public static final String UPGRADE_TXT_FILENAME = "upgrade.txt";
@@ -73,7 +72,7 @@ public class Main {
 	 */
 	private static String getTdcHome() throws BootstrapException {
 
-		String tdcHomeProperty = System.getProperty("tdc.home");
+		String tdcHomeProperty = System.getProperty("tdc.home").replaceAll("\"", "");
 
 		if( tdcHomeProperty == null ) {
 			throw new BootstrapException(ResourceBundleUtils.getString("bootstrap.main.error.tdcHomeNotSpecified"));
@@ -81,7 +80,7 @@ public class Main {
 		
 		File tdcHome = new File( tdcHomeProperty );
 		if( !tdcHome.isDirectory() ) {
-			throw new BootstrapException(ResourceBundleUtils.getString("bootstrap.main.error.tdcHomeNotDirectory"));
+			throw new BootstrapException(ResourceBundleUtils.getString("bootstrap.main.error.tdcHomeNotDirectory") + ": " + tdcHomeProperty);
 		}
 
 		return tdcHome.getAbsolutePath();
@@ -205,94 +204,87 @@ public class Main {
 		String tdcConfigUrl = Main.getTdcConfigUrl();
         
 		try {
-            ConsoleUtils.messageOut("Retrieving client configuration: " + tdcConfigUrl);
-			HttpClient client = new HttpClient();
-			GetMethod method = new GetMethod(tdcConfigUrl);
-            String proxyHost = ResourceBundleUtils.getProxyString("proxy.host");
-            String proxyPort = ResourceBundleUtils.getProxyString("proxy.port");
-            String proxyUsername = ResourceBundleUtils.getProxyString("proxy.username");
-            String proxyPassword = ResourceBundleUtils.getProxyString("proxy.password");
-
-            boolean proxyHostDefined = proxyHost != null && proxyHost.length() > 0;
-            boolean proxyPortDefined = proxyPort != null && proxyPort.length() > 0;
-            boolean proxyUsernameDefined = proxyUsername != null && proxyUsername.length() > 0;
+            ConsoleUtils.messageOut("Retrieving client configuration: " + tdcConfigUrl);           
             
-            if( proxyHostDefined && proxyPortDefined ) {
-                client.getHostConfiguration().setProxy(proxyHost, Integer.valueOf(proxyPort));
-            } else if( proxyHostDefined ) {
-                client.getHostConfiguration().setProxyHost(new ProxyHost(proxyHost) );
-            }
-            
-            if( proxyHostDefined && proxyUsernameDefined ) {
-                AuthScope proxyScope;
-                
-                if( proxyPortDefined )
-                    proxyScope = new AuthScope(proxyHost, Integer.valueOf(proxyPort), AuthScope.ANY_REALM);
-                else
-                    proxyScope = new AuthScope(proxyHost, AuthScope.ANY_PORT, AuthScope.ANY_REALM);
-                
-                UsernamePasswordCredentials upc = new UsernamePasswordCredentials(proxyUsername, proxyPassword);
-                client.getParams().setAuthenticationPreemptive(true);
-                client.getState().setProxyCredentials(proxyScope, upc);
-            }
-            
-            if (client.executeMethod(method) == HttpStatus.SC_OK) {
-            	byte[] inBuff = method.getResponseBody();
-            	byte[] outBuff = TdcConfigEncryption.decrypt(inBuff);
-                ByteArrayInputStream decrypted = new ByteArrayInputStream( outBuff );
-
-				ZipInputStream zis = new ZipInputStream( decrypted );
-				ZipEntry zipEntry;
-				
-				ConsoleUtils.messageOut("Zip entries...");
-				while( (zipEntry = zis.getNextEntry()) != null ) {
-					if( !zipEntry.isDirectory() ) {
-                        String zipEntryFilePath = null;
-                        String zipEntryFileName = zipEntry.getName();
-                        if ( zipEntryFileName.indexOf("LockdownBrowser.ini") >= 0 ) {
-                            if ( ! macOS ) {
-                                zipEntryFilePath = tdcHome + "/" + zipEntryFileName;
-                            }
-                        }
-                        else
-                        if ( zipEntryFileName.indexOf("LDB Settings.plst") >= 0 ) {
-                            if ( macOS ) {
-                                zipEntryFilePath = "/Library/Application Support/LockdownBrowser/" + zipEntryFileName;
-                            }
-                        }
-                        else {
-                            zipEntryFilePath = tdcHome + "/" + zipEntryFileName;
-                        }
-                        
-                        if ( zipEntryFilePath != null ) {
-    						ConsoleUtils.messageOut( " - writing " + zipEntryFilePath );
-    						File file = new File(zipEntryFilePath);
-    						FileOutputStream fos = new FileOutputStream(file, false);
-    						int read = 0;
-    						while( read >= 0 && read < zipEntry.getSize() ) {
-    							byte[] bytes = new byte[2048];
-    							// fix typo
-    							read = zis.read(bytes);
-    							if( read != -1 ) {
-    								fos.write(bytes, 0, read);
-    							}
-    						}
-    						fos.close();
-                        }
-                        
-					} else {
-						new File(zipEntry.getName()).mkdir();
-					}
-				}
-				zis.close();
-                ConsoleUtils.messageOut("Done with zip entries.");
-			} else {
-				throw new BootstrapException( ResourceBundleUtils.getString("bootstrap.main.error.clientConfigNotRetrieved"));
+			byte[] inBuff = null;
+					
+			if (isLinux()){
+				inBuff = ServletUtils.httpClientSendRequest4Update(tdcConfigUrl);        						
+			}else{
+				inBuff = ServletUtils.httpClientSendServerRequest(tdcConfigUrl);
 			}
 			
+			
+			byte[] outBuff = TdcConfigEncryption.decrypt(inBuff);       	        	                               	
+            ByteArrayInputStream decrypted = new ByteArrayInputStream( outBuff );           
+
+			ZipInputStream zis = new ZipInputStream( decrypted );
+			ZipEntry zipEntry;
+			
+			ConsoleUtils.messageOut("Zip entries...");
+			while( (zipEntry = zis.getNextEntry()) != null ) {
+				
+				if( !zipEntry.isDirectory() ) {
+                    String zipEntryFilePath = null;
+                    String zipEntryFileName = zipEntry.getName();
+                    
+                    System.out.println("zipEntry.getName =" + zipEntryFileName);
+                    if ( zipEntryFileName.indexOf("LockdownBrowser.ini") >= 0 ) {
+                        if ( ! macOS ) {
+                            zipEntryFilePath = tdcHome + "/" + zipEntryFileName;
+                           
+                        }
+                    }
+                    else
+                    if ( zipEntryFileName.indexOf("LDB Settings.plst") >= 0 ) {
+                        if ( macOS ) {
+                            zipEntryFilePath = "/Library/Application Support/LockdownBrowser/" + zipEntryFileName;
+                        }
+                    }
+                    else {
+                        zipEntryFilePath = tdcHome + "/" + zipEntryFileName;
+                    }
+                    System.out.println("zipEntryFilePath =" + zipEntryFilePath);
+                    try {
+	                    if ( zipEntryFilePath != null ) {
+	                    	 System.out.println("Check 3");
+							ConsoleUtils.messageOut( " - writing " + zipEntryFilePath );
+							File file = new File(zipEntryFilePath);
+							FileOutputStream fos = new FileOutputStream(file, false);
+							int numBytes;
+							byte[] buffer = new byte[1024];
+							while ((numBytes = zis.read(buffer, 0, buffer.length)) != -1){
+				                fos.write(buffer, 0, numBytes);
+				            }
+							/*int read = 0;
+							System.out.println("zipEntry.getSize() -> " + zipEntry.getSize());
+							while( read >= 0 && read < zipEntry.getSize() ) {
+								byte[] bytes = new byte[2048];
+								// fix typo
+								read = zis.read(bytes);
+								if( read != -1 ) {
+									fos.write(bytes, 0, read);
+								}
+							}*/
+							fos.close();
+					    }
+                    } catch(ZipException ze) {
+                    	ze.printStackTrace();
+                    	ConsoleUtils.messageOut("Exception reading file from zip: " + zipEntryFilePath);
+                    }
+               } else {
+					new File(zipEntry.getName()).mkdir();
+				}
+			}
+			
+			zis.close();
+            ConsoleUtils.messageOut("Done with zip entries.");
 		} catch( IOException ioe ) {
-			ioe.printStackTrace();
-			throw new BootstrapException( ResourceBundleUtils.getString("bootstrap.main.error.clientConfigIOException") );
+			ioe.printStackTrace(); // TDC should continue even without update if error comes
+			//throw new BootstrapException( ResourceBundleUtils.getString("bootstrap.main.error.clientConfigIOException") );
+		} catch (Exception e) {
+			e.printStackTrace();
+			//throw new BootstrapException( ResourceBundleUtils.getString("bootstrap.main.error.clientConfigIOException") );
 		}
 	}
 	
@@ -308,55 +300,40 @@ public class Main {
 		try {
             ConsoleUtils.messageOut("Retrieving upgrade: " + upgradeUrl);
             
-            Protocol myhttps = new Protocol("https", new com.ctb.tdc.bootstrap.util.EasySSLProtocolSocketFactory(), 443);
-			Protocol.registerProtocol("https", new Protocol("https", new com.ctb.tdc.bootstrap.util.EasySSLProtocolSocketFactory(),443));
-            
-			HttpClient client = new HttpClient();
-			GetMethod method = new GetMethod(upgradeUrl);
-            String proxyHost = ResourceBundleUtils.getProxyString("proxy.host");
-            String proxyPort = ResourceBundleUtils.getProxyString("proxy.port");
-            String proxyUsername = ResourceBundleUtils.getProxyString("proxy.username");
-            String proxyPassword = ResourceBundleUtils.getProxyString("proxy.password");
-
-            boolean proxyHostDefined = proxyHost != null && proxyHost.length() > 0;
-            boolean proxyPortDefined = proxyPort != null && proxyPort.length() > 0;
-            boolean proxyUsernameDefined = proxyUsername != null && proxyUsername.length() > 0;
-            
-            if( proxyHostDefined && proxyPortDefined ) {
-                client.getHostConfiguration().setProxy(proxyHost, Integer.valueOf(proxyPort));
-            } else if( proxyHostDefined ) {
-                client.getHostConfiguration().setProxyHost(new ProxyHost(proxyHost) );
-            }
-            
-            if( proxyHostDefined && proxyUsernameDefined ) {
-                AuthScope proxyScope;
-                
-                if( proxyPortDefined )
-                    proxyScope = new AuthScope(proxyHost, Integer.valueOf(proxyPort), AuthScope.ANY_REALM);
-                else
-                    proxyScope = new AuthScope(proxyHost, AuthScope.ANY_PORT, AuthScope.ANY_REALM);
-                
-                UsernamePasswordCredentials upc = new UsernamePasswordCredentials(proxyUsername, proxyPassword);
-                client.getParams().setAuthenticationPreemptive(true);
-                client.getState().setProxyCredentials(proxyScope, upc);
-            }
-            
-            if (client.executeMethod(method) == HttpStatus.SC_OK) {
-				result = method.getResponseBodyAsString();
-                ConsoleUtils.messageOut("Got upgrade.");
+            result = ServletUtils.httpClientSendRequest(upgradeUrl);
+            if(result != null) {
+        		ConsoleUtils.messageOut("Got upgrade.");
 			} else {
-				throw new BootstrapException( ResourceBundleUtils.getString("bootstrap.main.error.clientConfigNotRetrieved"));
+				System.out.println("Error getting upgrade from " + upgradeUrl);   				
 			}
-			
-		} catch( IOException ioe ) {
-			ioe.printStackTrace();
-			throw new BootstrapException( ResourceBundleUtils.getString("bootstrap.main.error.clientConfigIOException") );
+		} catch( Exception e ) {
+			e.printStackTrace();
+			result = null;
 		}
 		return result;
 	}
 	
 	private static String getUpgradeDirectoryUrl(){
-		String base = ResourceBundleUtils.getString("bootstrap.main.base.url");
+		String productType = System.getProperty("product.type");
+		String base = "";
+		base = ResourceBundleUtils.getString("bootstrap.main.base.tdcupdate.url");
+		/*baseurl = System.getProperty("tdc.baseurl");
+		if(baseurl != null && !"".equals(baseurl.trim())) {
+			base = baseurl + "/tdcupdate";
+		} else {
+			if(productType.equals("ISTEP"))
+				base = ResourceBundleUtils.getString("bootstrap.main.istep.url");
+			else if(productType.equals("GEORGIA"))
+				base = ResourceBundleUtils.getString("bootstrap.main.ga.url");
+			else if(productType.equals("TABE"))
+				base = ResourceBundleUtils.getString("bootstrap.main.tabe.url");
+			else if(productType.equals("TERRANOVA"))
+				base = ResourceBundleUtils.getString("bootstrap.main.tn.url");
+			else if(productType.equals("LASLINKS"))
+				base = ResourceBundleUtils.getString("bootstrap.main.llo.url");
+			else 
+				base = ResourceBundleUtils.getString("bootstrap.main.base.url");
+		}*/		
 		String version = ResourceBundleUtils.getVersionString("tdc.version");
 		version = "v" + version.substring(0, version.lastIndexOf("."));
 		String result = base + "/" + version + "/";
@@ -380,14 +357,55 @@ public class Main {
 		int exitCode = -1;
 		boolean macOS = isMacOS();
 		boolean linux = isLinux();
-        
-        
+		
 		// Use a socket to check if the application is already running or not.
 		ConsoleUtils.messageOut("Starting...");
-		ServerSocket ss = null; // keep variable in scope of the main method to maintain hold on it. 
+		ServerSocket startsocket = null; // keep variable in scope of the main method to maintain hold on it. 
+		ServerSocket stopsocket = null;
+		
 		try {
-			//ss = new ServerSocket(SOCKET_FOR_SINGLE_INSTANCE, 1);
+			jettyPort = 12345;
+			startsocket = new ServerSocket(jettyPort, 1);
+			System.out.println("Using jetty port " + jettyPort);
 		} catch( Exception e ) {
+			jettyPort = 0;
+		}
+		try {
+			stopPort = 12355;
+			stopsocket = new ServerSocket(stopPort, 1);
+			System.out.println("Using stop port " + stopPort);
+		} catch( Exception e ) {
+			stopPort = 0;
+		}
+		
+		boolean allowMulti = !"false".equalsIgnoreCase(ResourceBundleUtils.getString("bootstrap.main.allowmulti"));
+		if(allowMulti && (jettyPort == 0 || stopPort == 0)) {
+			int i = 0;
+			while (i < 25) {
+				try {
+					jettyPort = 12345 + ((int) ((Math.random() + 1.0) * 250));
+					startsocket = new ServerSocket(jettyPort, 1);
+					//startsocket.close();
+					System.out.println("Using jetty port " + jettyPort);
+					i = 25;
+				} catch( Exception e ) {
+					jettyPort = 0;
+				}
+			}
+			i = 0;
+			while (i < 25) {
+				try {
+					stopPort = 12345 + ((int) ((Math.random() + 1.0) * 250));
+					stopsocket = new ServerSocket(stopPort, 1);
+					//stopsocket.close();
+					System.out.println("Using stop port " + stopPort);
+					i = 25;
+				} catch( Exception e ) {
+					stopPort = 0;
+				}
+			}
+		}
+		if(jettyPort == 0 || stopPort == 0) {
 			String message = ResourceBundleUtils.getString("bootstrap.main.error.applicationAlreadyRunning");
 			ConsoleUtils.messageErr(message);
 			SimpleMessageDialog.showErrorDialog(message);
@@ -417,7 +435,8 @@ public class Main {
 		// check upgrade, download and config if required, show upgrade message if required.
 		try {
 			splashWindow.setStatus(ResourceBundleUtils.getString("bootstrap.main.splashWindow.status.default"), -1);
-            Main.copyPropertyFiles(tdcHome);     
+            Main.copyPropertyFiles(tdcHome);   
+            ServletUtils.validateServletSettings();
             String upgrade = Main.getUpgrade();
             if(upgrade != null){
 	            if(upgrade.contains(MINOR_UPGRADE)){
@@ -426,6 +445,7 @@ public class Main {
 	            }
 	            else if (upgrade.contains(MAJOR_UPGRADE)){
 	    			ConsoleUtils.messageErr("Requires major upgrade.");
+	    			if (linux) splashWindow.hide();
 	    			SimpleMessageDialog.showErrorDialog(ResourceBundleUtils.getString("bootstrap.main.error.upgrade"));
 	    			ConsoleUtils.messageOut("Done.");
 					Main.deletePropertyFiles(tdcHome);        
@@ -434,6 +454,7 @@ public class Main {
             }
 		} catch( BootstrapException be ) {
 			ConsoleUtils.messageErr("An exception has occurred.", be);
+			if (linux) splashWindow.hide();
 			SimpleMessageDialog.showErrorDialog(be.getMessage());
 			ConsoleUtils.messageOut("Done.");
 			Main.deletePropertyFiles(tdcHome);        
@@ -443,13 +464,22 @@ public class Main {
 		 
 		// The two (loosely) managed processes.
         ConsoleUtils.messageErr("Begin starting processes...");
-		LockdownBrowserWrapper ldb = new LockdownBrowserWrapper(tdcHome, macOS, linux, splashWindow);
+		LockdownBrowserWrapper ldb = new LockdownBrowserWrapper(tdcHome, macOS, linux, splashWindow, jettyPort);
+		//Start process killer for Windows only
+		if(!linux && ! macOS) {
+			//Retrieve all the process names at the beginning itself.
+			LockdownWin lockdownOK = new LockdownWin(tdcHome);
+			LockdownWin.getAllProcessName();
+			LockdownWin.allProcessNameStr = LockdownWin.allProcessNameStr.substring(0, LockdownWin.allProcessNameStr.length() - 1);
+			lockdownOK.start();
+		}
 		JettyProcessWrapper jetty = null;
 		try {
-			jetty = new JettyProcessWrapper(tdcHome, macOS);
+			jetty = new JettyProcessWrapper(tdcHome, macOS, jettyPort, stopPort, startsocket, stopsocket, baseurl);
 		} 
         catch( ProcessWrapperException pwe ) {
 			ConsoleUtils.messageErr("An exception has occurred.", pwe);
+			if (linux) splashWindow.hide();
 			SimpleMessageDialog.showErrorDialog(pwe.getMessage());
 			ConsoleUtils.messageOut("Done.");
 			Main.deletePropertyFiles(tdcHome);        
@@ -468,8 +498,7 @@ public class Main {
 			jetty.start();
 			boolean ldbLaunched = false;
 			while( jetty.isAlive() ) {
-				Thread.sleep( Main.SLEEP_INTERVAL * 1000 );
-				
+
 				if( jetty.isAvailable() && !ldbLaunched ) {
 					splashWindow.setStatus(" ", 100);
 					ldb.start();
@@ -489,10 +518,13 @@ public class Main {
                     // delete proxy.properties
 					Main.deletePropertyFiles(tdcHome);        
 				}
+				
+				Thread.sleep( Main.SLEEP_INTERVAL * 1000 );
 			}
 
 			// Check the exit codes of the wrapper processes.
 			if( jetty.getExitCode() != 0 ) {
+    			if (linux) splashWindow.hide();
 				SimpleMessageDialog.showErrorDialog(jetty.getExitMessage());
 				exitCode = -1;
 			} else {
@@ -500,6 +532,7 @@ public class Main {
 			}
 			
 		} catch( InterruptedException ie ) {
+			if (linux) splashWindow.hide();
 			SimpleMessageDialog.showErrorDialog(ie.getMessage());
 			ConsoleUtils.messageErr("An exception has occurred.", ie);
 			exitCode = -1;
@@ -512,27 +545,104 @@ public class Main {
 			}
 			
 		} finally {
-			
-			if( !ss.isClosed() ) {
-				try {
-					ss.close();
-				} catch( IOException e ) {
-					ConsoleUtils.messageErr("An exception has occurred.", e);
+			try {
+				if( !startsocket.isClosed() ) {
+					try {
+						startsocket.close();
+					} catch( IOException e ) {
+						ConsoleUtils.messageErr("An exception has occurred.", e);
+					}
 				}
+				if( !stopsocket.isClosed() ) {
+					try {
+						stopsocket.close();
+					} catch( IOException e ) {
+						ConsoleUtils.messageErr("An exception has occurred.", e);
+					}
+				}
+				        
+	            if (macOS) {
+	                setFilePermission(tdcHome);
+	            }
+	            
+	            // Deactivate the disablers
+	            macScreenSaverDisabler.deactivate();
+	            
+				// Close out the application.
+				ConsoleUtils.messageOut("Done.");
+			} finally {
+				
+				// make sure LDB is dead
+				LockdownBrowserWrapper.exit();
+				
+				// make sure jetty is dead
+				if( jetty != null && jetty.isAlive() ) {
+					jetty.shutdown();
+				}
+
+				// make sure bootstrap is dead
+				System.exit(exitCode);
 			}
-			        
-            if (macOS) {
-                setFilePermission(tdcHome);
-            }
-            
-            // Deactivate the disablers
-            macScreenSaverDisabler.deactivate();
-            
-			// Close out the application.
-			ConsoleUtils.messageOut("Done.");
-			System.exit(exitCode);
 		}
 
+	}
+	
+private static class LockdownWin extends Thread {
+		
+		private static String allProcessNameStr = "";
+		
+		private String tdcHome;
+		
+		public LockdownWin(String tdcHome){
+			this.tdcHome = tdcHome;
+		}
+		public void run() {
+			try {
+				while(true){
+					isProcessRunning(allProcessNameStr);
+					Thread.sleep(2000);
+				}
+					
+			} catch (Exception e) {
+				e.printStackTrace();
+			}
+		}
+		
+		public  static void getAllProcessName () {
+			try {
+				Enumeration<String> em=ResourceBundleUtils.getAllBlistProcessKeys();
+				while(em.hasMoreElements()){
+				  String keyStr = (String)em.nextElement();
+				  allProcessNameStr = allProcessNameStr + ResourceBundleUtils.getBlistProcessString(keyStr).toLowerCase() + ",";
+				}
+			} catch (Exception e) {
+				e.printStackTrace();
+			}
+		}
+		
+		public static void isProcessRunning(String serviceNames) throws Exception {
+			 Process processList = Runtime.getRuntime().exec("tasklist");
+			 BufferedReader reader = new BufferedReader(new InputStreamReader(
+			 processList.getInputStream()));
+			 String line;
+			 while ((line = reader.readLine()) != null) {
+				 if(line.equals("") || line.length() == 0) {
+					  continue;
+				  }
+				  String lineProcess= line.substring(0, line.indexOf(" ")).toLowerCase();
+				  
+				  if (serviceNames.contains(lineProcess))
+				  {
+					  killProcess(line.substring(0, line.indexOf(" ")));
+				  }
+			}
+
+		} 	
+		
+		public static void killProcess(String serviceName) throws Exception {
+			  Runtime.getRuntime().exec("taskkill /F /IM "+ serviceName);
+		 }		
+		
 	}
 
     private static void setPermission(String fileName) {

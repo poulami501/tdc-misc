@@ -52,6 +52,8 @@ public class BandwidthMainWindow extends JFrame implements ActionListener {
 
 	private static final long serialVersionUID = 1L;
 	
+	private static final int DIVISOR = 5;
+	
 	private static final Dimension WINDOW_DIMENSIONS = new Dimension(650,550);
 	private static final Color WINDOW_BACKGROUND_COLOR = SystemColor.control;
 	private static final Font WINDOW_FONT_PLAIN = new Font("Arial", Font.PLAIN, 12);  
@@ -699,8 +701,14 @@ public class BandwidthMainWindow extends JFrame implements ActionListener {
 	}
 	
 	private JTextField getTextField() {
+		
+		
 		if (textField == null) {
-			textField = new JTextField(2);	// allow 3 characters
+	        String os = System.getProperty("os.name");
+	        if ((os != null) && (os.toLowerCase().indexOf("linux") != -1))
+				textField = new JTextField(3);	// allow 3 characters for Linux
+	        else
+	        	textField = new JTextField(2);	// allow 3 characters for PC and MAC
 			
 			FixedSizePlainDocument fspd = new FixedSizePlainDocument(3);
 			textField.setDocument(fspd);
@@ -802,7 +810,7 @@ public class BandwidthMainWindow extends JFrame implements ActionListener {
 
 		System.out.println("endSimulation ( " + numberMachines + " )   ---   time spent = " + numberSeconds + " seconds   ---   totalBytesRead = " + byteReadStr + "    ---   bandwidth = " + bandwidthStr + " Kbps");
 		
-    	String text = " " + numberMachines + "\t\t";		
+    	String text = " " + (numberMachines * DIVISOR) + "\t\t";		
     	insertReportString(text, "regular");
     	String description = "";
     	
@@ -832,7 +840,7 @@ public class BandwidthMainWindow extends JFrame implements ActionListener {
 		
     	insertReportString("\n", "regular");
     		
-    	this.outputText += numberMachines  + "\t\t" + byteReadStr + "\t" + bandwidthStr + "\t\t" + description;	
+    	this.outputText += (numberMachines * DIVISOR)  + "\t\t" + byteReadStr + "\t" + bandwidthStr + "\t\t" + description;	
     	this.outputText += System.getProperty("line.separator");
     	
     	this.repaint();
@@ -1014,17 +1022,20 @@ public class BandwidthMainWindow extends JFrame implements ActionListener {
 		
 		ArrayList list = new ArrayList();
 
-		int numInterval = maxMachines / 4;
+		int numInterval = (maxMachines / 4) / DIVISOR;
+		if(numInterval < 1) numInterval = 1;
 			
 		int num = numInterval;
-		while (num <= maxMachines) {
+		while (num <= (maxMachines/DIVISOR)) {
 			list.add(new Integer(num));		
 			num += numInterval;
 		}			
 		
 		Integer value = (Integer)list.get(list.size()-1);		
-		if (value.intValue() != maxMachines) {
-			list.add(new Integer(maxMachines));		
+		if (value.intValue() != (maxMachines/DIVISOR)) {
+			num = maxMachines / DIVISOR;
+			if(num < 1) num = 1;
+			list.add(new Integer(num));		
 		}
 
 		return list;
